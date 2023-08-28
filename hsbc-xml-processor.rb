@@ -37,26 +37,90 @@ MESES = [
   :diciembre
 ].freeze
 MESES_ABR = Hash[MESES.compact.map { |m| [:"#{m[0..2]}", m.to_sym] }]
-MANTENIMIENTO_MENSUAL = 3_500.00
-MANTENIMIENTO_CGM13 = 1_800.00
-ID_CARGOS = {
-  'AMAZON' => { desc: 'Compra en Amazon', categoria: :extraord },
-  'CFE' => { desc: 'CFE', categoria: :cfe },
-  'EDER' => { desc: 'Conserje', categoria: :conserje },
-  'impieza' => { desc: 'Servicio de Limpieza', categoria: :conserje },
-  'RETIRO CAJERO' => { desc: 'Retiro cajero', categoria: :caja_chica },
-  'CGM' => { desc: 'Pago Mantenimiento Cerrada', categoria: :mto_cgm },
-  'CGM 13' => { desc: 'Pago Mantenimiento Cerrada', categoria: :mto_cgm },
-  'CGM13' => { desc: 'Pago Mantenimiento Cerrada', categoria: :mto_cgm },
-  'MERPAGO' => { desc: 'Compra en Mercado Libre', categoria: :extraord },
-  'PAGO' => { desc: 'Compra o pago de servicio', categoria: :otros },
-  'CGO' => { desc: 'Transferencia', categoria: :otros }
-}.freeze
-REGEX_MTO_CASA = /(?<casa>ksa|ka[sd]a|ca[sd]a|c)\s*(?<num_casa>[1-6])/i
-REGEX_PAGO_MTO_SIN_ID = /(PAGO\s*)?(mantenimiento|mant|mto)/i
-REGEX_ABONO_HSBC = /ABONO BPI DE CUENTA/i
-REGEX_MES = /[\s\b](?<mes>#{MESES.compact.join('|')}|#{MESES_ABR.keys.compact.join('|')})/i
 STR_ABONO_CASA = 'Mantenimiento Casa'
+ID_MOVS = [
+  {
+    desc: "#{STR_ABONO_CASA} 4",
+    categoria: :pago_mto,
+    tipo: :ingreso,
+    casa: 'Casa 4',
+    regex: /ABONO BPI DE CUENTA/i,
+    importes: [3_500.0]
+  },
+  {
+    desc: "#{STR_ABONO_CASA} %<num_casa>s",
+    categoria: :pago_mto,
+    tipo: :ingreso,
+    casa: 'Casa %<num_casa>s',
+    regex: /(?<casa>ksa|ka[sd]a|ca[sd]a|c)\s*(?<num_casa>[1-6])/i,
+    capturas: [:num_casa],
+    importes: [3_500.0]
+  },
+  {
+    desc: "#{STR_ABONO_CASA} (sin identificar)",
+    categoria: :pago_mto,
+    tipo: :ingreso,
+    casa: 'Sin identificar',
+    regex: /(PAGO\s*)?(mantenimiento|mant|mto)/i,
+    importes: [3_500.0]
+  },
+  {
+    desc: 'Compra en Amazon',
+    categoria: :extraord,
+    tipo: :gasto,
+    regex: /amazon/i
+  },
+  {
+    desc: 'CFE',
+    categoria: :cfe,
+    tipo: :gasto,
+    regex: /cfe/i
+  },
+  {
+    desc: 'Conserje',
+    categoria: :conserje,
+    tipo: :gasto,
+    regex: /eder/i
+  },
+  {
+    desc: 'Servicio de Limpieza',
+    categoria: :conserje,
+    tipo: :gasto,
+    regex: /impieza/i
+  },
+  {
+    desc: 'Retiro de cajero',
+    categoria: :caja_chica,
+    tipo: :gasto,
+    regex: /retiro cajero/i
+  },
+  {
+    desc: 'Pago Mantenimiento de la Cerrada',
+    categoria: :mto_cgm,
+    tipo: :gasto,
+    regex: /(mto|mantenimiento.+cgm\s*13)|(cgm\s*13.+mto|mantenimiento)/i,
+    importes: [1_800.0]
+  },
+  {
+    desc: 'Compra en Mercado Libre',
+    categoria: :extraord,
+    tipo: :gasto,
+    regex: /merpago/i
+  },
+  {
+    desc: 'Compra o pago de servicio',
+    categoria: :otros,
+    tipo: :gasto,
+    regex: /pago/i
+  },
+  {
+    desc: 'Transferencia',
+    categoria: :otros,
+    tipo: :gasto,
+    regex: /cgo/i
+  }
+].freeze
+REGEX_MES = /[\s\b](?<mes>#{MESES.compact.join('|')}|#{MESES_ABR.keys.compact.join('|')})/i
 
 fecha_actual = Date.today
 edo_cta = {
@@ -103,25 +167,27 @@ edo_cta = {
   saldo_cta_hoy: 0
 }.freeze
 
-def extraer_mes_movimiento(desc)
+def extraer_mes_movimiento(desc, fecha)
   desc.match(REGEX_MES) do |m|
     mes = m[:mes].downcase.to_sym
-    return MESES_ABR[mes] || mes if m[:mes].length > 3
+    return MESES_ABR[mes] || mes if m[:mes].length == 3
 
     return mes
   end
 
-  :nd
+  MESES[fecha.month] || :nd
 end
 
 def extraer_movs(xml_doc)
   movs = []
+
   (xml_doc.xpath(*XPATH_MOVS) || []).each do |movimiento|
+    fecha = Date.parse(movimiento['fecha'])
     movs << {
-      fecha: Date.parse(movimiento['fecha']),
+      fecha:,
       desc_mov: movimiento['descripcion'],
       importe: movimiento['importe'].to_f,
-      mes: extraer_mes_movimiento(movimiento['descripcion'])
+      mes: extraer_mes_movimiento(movimiento['descripcion'], fecha)
     }
   end
 
@@ -150,78 +216,46 @@ def extraer_conceptos(archivo)
   conceptos
 end
 
-def etiquetar_gasto(concepto)
-  ID_CARGOS.each do |id, desc|
-    if concepto[:desc_mov].match?(/#{id}/i)
-      return concepto.merge(desc).merge(tipo: :gasto, importe: concepto[:importe] * -1)
+def etiquetar_mov(concepto)
+  ID_MOVS.each do |mov|
+    concepto[:desc_mov].match(mov[:regex]) do |m|
+      mov_simplificado = mov.except(:regex, :capturas, :importes)
+
+      if mov[:capturas]
+        hsh = mov[:capturas].reduce({}) { |acc, val| acc.merge(val => m[val]) }
+        mov_simplificado[:desc] = format(mov[:desc], hsh)
+        mov_simplificado[:casa] = format(mov[:casa], hsh)
+      end
+
+      if mov.key?(:importes)
+
+        return concepto.merge(mov_simplificado) if mov[:importes].include?(concepto[:importe])
+
+        next
+      end
+
+      return concepto.merge(mov_simplificado)
     end
   end
 
   nil
 end
 
-def etiquetar_pago_mto_c4(concepto)
-  if concepto[:desc_mov].match?(REGEX_ABONO_HSBC)
-    return concepto.merge({
-                            desc: "#{STR_ABONO_CASA} 4",
-                            categoria: :pago_mto,
-                            tipo: :ingreso,
-                            casa: 'Casa 4'
-                          })
-  end
-
-  nil
-end
-
-def etiquetar_ingreso_casa(concepto)
-  concepto[:desc_mov].match(REGEX_MTO_CASA) do |m|
-    return concepto.merge({
-                            desc: "#{STR_ABONO_CASA} #{m[:num_casa]}",
-                            categoria: :pago_mto,
-                            tipo: :ingreso,
-                            casa: "Casa #{m[:num_casa]}"
-                          })
-  end
-
-  nil
-end
-
-def etiquetar_ingreso_sin_identificar(concepto)
-  if concepto[:desc_mov].match?(REGEX_PAGO_MTO_SIN_ID) && concepto[:importe] == MANTENIMIENTO_MENSUAL
-    return concepto.merge({
-                            desc: "#{STR_ABONO_CASA} (sin identificar)",
-                            categoria: :pago_mto,
-                            tipo: :ingreso,
-                            casa: 'Sin identificar'
-                          })
-  end
-
-  nil
-end
-
-def etiquetar_ingreso(concepto)
-  etiquetar_ingreso_casa(concepto) ||
-    etiquetar_ingreso_sin_identificar(concepto)
-end
-
 def procesar_conceptos(conceptos)
   conceptos.map do |c|
-    etiquetar_pago_mto_c4(c) ||
-      etiquetar_ingreso(c) ||
-      etiquetar_gasto(c) ||
-      c.merge({ desc: :nd, categoria: :nd, tipo: :nd })
+    etiquetar_mov(c) || c.merge({ desc: :nd, categoria: :nd, tipo: :nd })
   end
 end
 
-def agregar_a_edo_cta(movs, edo_cta)
-  movs.each do |mov|
-    case mov[:tipo]
+def agregar_a_edo_cta(conceptos, edo_cta)
+  conceptos.each do |concepto|
+    case concepto[:tipo]
     when :gasto
-      edo_cta[:movs][:gastos][mov[:categoria]] << mov
+      edo_cta[:movs][:gastos][concepto[:categoria]] << concepto.merge(importe: concepto[:importe] * -1)
     when :ingreso
-      edo_cta[:movs][:pago_mto][mov[:casa]] << mov
+      edo_cta[:movs][:pago_mto][concepto[:casa]] << concepto
     else
-      edo_cta[:movs][:sin_categoria] << mov
+      edo_cta[:movs][:sin_categoria] << concepto
     end
   end
 end
