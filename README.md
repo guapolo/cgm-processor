@@ -1,4 +1,4 @@
-# AMS Time Sheet Filler
+# CGM Processor
 
 ## Requirements
 
